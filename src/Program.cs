@@ -9,7 +9,7 @@ using APSIM.Server.Commands;
 using APSIM.Shared.Utilities;
 using CommandLine;
 using Microsoft.Rest;
-using Models.Core.Run;
+using Models.Core.Replace;
 
 namespace APSIM.Bootstrapper
 {
@@ -43,6 +43,9 @@ namespace APSIM.Bootstrapper
 
                     // 1. Initialise the job.
                     bootstrapper.Initialise();
+
+                    // Cleanup existing pods so we're starting from a known state.
+                    bootstrapper.CleanupPods();
 
                     // Create the job manager.
                     bootstrapper.CreateJobManager();

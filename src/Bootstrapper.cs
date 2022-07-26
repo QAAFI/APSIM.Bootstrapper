@@ -71,7 +71,7 @@ namespace APSIM.Bootstrapper
         /// <summary>
         /// Name of the docker image used by the job manager.
         /// </summary>
-        private const string imageName = "apsiminitiative/apsimng-server:latest";
+        private const string imageName = "dhub.cgmwgp.com/apsimng:latest";
 
         /// <summary>
         /// Name of the job manager pod.
@@ -309,20 +309,36 @@ namespace APSIM.Bootstrapper
         /// <param name="options"></param>
         public Bootstrapper(Options options)
         {
-            var config = KubernetesClientConfiguration.BuildConfigFromConfigFile();
+            var config = KubernetesClientConfiguration.BuildConfigFromConfigFile("config");
             client = new Kubernetes(config);
             this.options = options;
             jobID = Guid.NewGuid();
-            jobNamespace = $"apsim-cluster-job-{jobID}";
+            jobNamespace = $"apsim-cluster";
+            //jobNamespace = $"apsim-cluster-job-{jobID}";
             if (!File.Exists(options.InputFile))
                 throw new FileNotFoundException($"File {options.InputFile} does not exist");
         }
 
         public void Initialise()
         {
+            var names = client.ListNamespace();
+            var exists = names.Items.Where(ns => ns.Name() == jobNamespace);
+            if(exists.Count() > 0) return; //namespace and service account have been added
+            
             // Create the namespace in which the job manager pod will run.
             CreateNamespace();
             Console.WriteLine($"export namespace={jobNamespace}");
+
+            // Create a service account for the job manager pod.
+            CreateServiceAccount();
+
+            // Create the role which will be linked to the service account.
+            // This role will give the job manager the necessary permissions
+            // to create and manage its worker pods.
+            CreateRole();
+
+            // Create a RoleBinding, linking the role to the service account.
+            CreateRoleBinding();
         }
 
         /// <summary>
@@ -419,7 +435,7 @@ namespace APSIM.Bootstrapper
             {
                 try
                 { 
-                    client.DeleteNamespace(jobNamespace);
+                    //client.DeleteNamespace(jobNamespace);
                 }
                 catch (HttpOperationException httpError)
                 {
@@ -455,7 +471,11 @@ namespace APSIM.Bootstrapper
             }
             catch (OperationCanceledException)
             {
+                string containerName = GetContainerName(podName);
+                string log = GetLog(jobNamespace, podName, containerName);
+
                 WriteToLog($"WARNING: Timeout while waiting for condition {condition.Method.Name} on pod {podName}. Continuing bootstrapper execution...", Verbosity.Information);
+                WriteToLog($"{podName} log: {log}", Verbosity.Information);
             }
         }
 
@@ -618,7 +638,7 @@ namespace APSIM.Bootstrapper
             labels["app.kubernetes.io/component"] = component;
             labels["app.kubernetes.io/part-of"] = partOf;
             labels["app.kubernetes.io/managed-by"] = managedBy;
-            labels["app.kubernetes.io/created-by"] = "drew";
+            labels["app.kubernetes.io/created-by"] = "jason";
 
             V1ObjectMeta namespaceMetadata = new V1ObjectMeta(name: jobNamespace, labels: labels);
             return new V1Namespace(apiVersion, "Namespace", namespaceMetadata);
@@ -632,16 +652,14 @@ namespace APSIM.Bootstrapper
         {
             try
             {
-                // Create a service account for the job manager pod.
-                CreateServiceAccount();
-
-                // Create the role which will be linked to the service account.
-                // This rolw eill give the job manager the necessary permissions
-                // to create and manage its worker pods.
-                CreateRole();
-
-                // Create a RoleBinding, linking the role to the service account.
-                CreateRoleBinding();
+                //check if the pod already exists
+                var pods = client.ListNamespacedPod(jobNamespace);
+                var existing = pods.Items.Where(p => p.Name() == jobManagerPodName);
+                if(existing.Count() > 0)
+                {
+                    WriteToLog($"Job manager pod already exists...", Verbosity.Information);
+                    return;
+                }
 
                 WriteToLog($"Creating job manager pod...", Verbosity.Information);
                 client.CreateNamespacedPod(CreateJobManagerPodTemplate(), jobNamespace);
@@ -661,6 +679,7 @@ namespace APSIM.Bootstrapper
         public void StartJobmanager()
         {
             CancellationTokenSource cts = new CancellationTokenSource(20 * 1000);
+
             WaitFor(jobManagerPodName, HasStarted, cts);
             SendStartSignalToPod(jobManagerPodName);
             WaitFor(jobManagerPodName, IsReady, cts);
@@ -690,6 +709,7 @@ namespace APSIM.Bootstrapper
         {
             return new V1ServiceAccount(
                 apiVersion,
+                imagePullSecrets: new []{new V1LocalObjectReference(name:"dockercred")},
                 metadata: new V1ObjectMeta(name: serviceAccountName, namespaceProperty: jobNamespace)
             );
         }
@@ -767,6 +787,22 @@ namespace APSIM.Bootstrapper
                 )}
             );
         }
+        ///<summary>Cleanup any existing manager or worker pods so we're starting from a known starting point</summary>
+        public void CleanupPods()
+        {
+            //string labelSelector = $"{podTypeLabelName}={workerPodType}";
+            string labelSelector = $"{podTypeLabelName} in ({jobManagerPodType}, {workerPodType})";
+            var pods = client.ListNamespacedPod(jobNamespace, labelSelector: labelSelector);
+            int count = pods.Items.Count();
+            WriteToLog($"Removing {count} pods...", Verbosity.Information);
+            foreach(var pod in pods.Items)
+            {
+                var rtmp = pod.Name();
+                client.DeleteNamespacedPod(pod.Name(), jobNamespace, new V1DeleteOptions(gracePeriodSeconds:0));
+            }
+            pods = client.ListNamespacedPod(jobNamespace, labelSelector: labelSelector);
+            count = pods.Items.Count();
+        }
 
         /// <summary>
         /// Instantiate a pod object which will run a single container (the job manager).
@@ -785,6 +821,7 @@ namespace APSIM.Bootstrapper
             string actualInputFile = Path.Combine(jobManagerInputsPath, Path.GetFileName(options.InputFile));
             V1PodSpec spec = new V1PodSpec(
                 containers: new[] { CreateJobManagerContainer(actualInputFile, options.CpuCount) },
+                imagePullSecrets: new []{new V1LocalObjectReference(name:"dockercred")},
                 serviceAccountName: serviceAccountName,
                 affinity: CreateJobManagerAffinity(),
                 restartPolicy: "Never" // If the job manager falls over for some reason, restart it.
@@ -887,7 +924,7 @@ namespace APSIM.Bootstrapper
             {
                 // Allow up to 5 seconds for the pod to become ready. This should be
                 // plenty of time if the number of workers is high.
-                int timeToWait = 5; // in seconds
+                int timeToWait = 15; // in seconds
                 CancellationTokenSource cts = new CancellationTokenSource(timeToWait * 1000);
                 WriteToLog($"Waiting for {podName} to become ready...", Verbosity.Information);
                 WaitFor(podName, IsReady, cts);
@@ -925,6 +962,7 @@ namespace APSIM.Bootstrapper
             V1PodSpec spec = new V1PodSpec()
             {
                 Containers = new[] { CreateWorkerContainerTemplate(GetContainerName(podName), file, portNo) },
+                ImagePullSecrets = new []{new V1LocalObjectReference(name:"dockercred")},
                 RestartPolicy = "Never",
                 Affinity = CreateWorkerAffinity(),
                 TopologySpreadConstraints = new V1TopologySpreadConstraint[]
@@ -1026,7 +1064,8 @@ namespace APSIM.Bootstrapper
                     new V1NodeSelectorRequirement()
                     {
                         Key = openStackNodeRoleLabelName,
-                        OperatorProperty = notIn,
+                        OperatorProperty = prefer ? @in : notIn,
+                        //OperatorProperty = notIn,
                         Values = new[] { openStackWorkerNodeRoleName }
                     }
                 }
