@@ -10,6 +10,7 @@ using APSIM.Shared.Utilities;
 using CommandLine;
 using Microsoft.Rest;
 using Models.Core.Replace;
+using System.Linq;
 
 namespace APSIM.Bootstrapper
 {
@@ -50,31 +51,67 @@ namespace APSIM.Bootstrapper
                     // Create the job manager.
                     bootstrapper.CreateJobManager();
 
+                    ushort iWorkers = 60;
                     // Create some workers as a test.
-                    IEnumerable<IPEndPoint> workers = bootstrapper.CreateWorkers(5, options.InputFile);
+                    IEnumerable<IPEndPoint> workers = bootstrapper.CreateWorkers(iWorkers, options.InputFile);
 
                     bootstrapper.StartJobmanager();
                     // bootstrapper.CreateDefaultSetup();
-
-                    
-                    // Let's do this bit twice, just for fun.
-                    for (int i = 0; i < 2; i++)
+                    var iterations = new List<List<PropertyReplacement>>();
+                    for(int i = 0; i < iWorkers; ++i)
                     {
+                        iterations.Add(new List<PropertyReplacement>{
+                            new PropertyReplacement("[Leaf].Parameters.tillerSdIntercept", "0.329"),
+                            new PropertyReplacement("[Phenology].TTEndJuvToInit", "160"),
+                            new PropertyReplacement("[Leaf].Parameters.aMaxSlope", "22.25")
+                        });
+                    // var listReplacements = new List<PropertyReplacement>{
+                    //     new PropertyReplacement("[Leaf].Parameters.tillerSdIntercept", "0.329"),
+                    //     new PropertyReplacement("[Phenology].TTEndJuvToInit", "160"),
+                    //     new PropertyReplacement("[Leaf].Parameters.aMaxSlope", "22.25")
+                        
+                    };
+                    var times = new List<(long cmd, long report)>();
+                    int iReps = 100;
+                    // Let's do this bit twice, just for fun.
+                    for (int i = 0; i < iReps; i++)
+                    {
+                        var stopwatch = Stopwatch.StartNew();
                         // 2. Run everything.
-                        RunCommand command = new RunCommand(new IReplacement[0]);
-                        bootstrapper.RunWithChanges(command);
+                        //var command = new WGPCommand(iterations);
+                        //var command = new RunCommand(listReplacements);
+                        //RunCommand command = new RunCommand(new IReplacement[0]);
+                        //bootstrapper.RunWithChanges(command);
+
+                        //stopwatch.Stop();
+                        //var cmdtime = stopwatch.ElapsedMilliseconds;
+                        //stopwatch.Start();
 
                         // 3. Read outputs.
                         IEnumerable<string> parameters = new[]
                         {
-                            "Date",
                             "BiomassWt",
                             "Yield"
                         };
-                        ReadCommand readCommand = new ReadCommand("Report", parameters);
-                        DataTable outputs = bootstrapper.ReadOutput(readCommand);
+                        //removed "Date",
+                        var readQuery = new WGPRelayCommand(iterations, "Report", parameters);
+                        //var readQuery = new ReadQuery("Report", parameters);
+                        var outputs = bootstrapper.ReadOutput(readQuery);
+                        stopwatch.Stop();
+                        var reporttime = stopwatch.ElapsedMilliseconds;
                         Console.WriteLine("Received output from cluster:");
-                        Console.WriteLine(DataTableUtilities.ToMarkdown(outputs, true));
+                        //Console.WriteLine(DataTableUtilities.ToMarkdown(outputs, true));
+                        foreach(var iter in outputs)
+                        {
+                            Console.WriteLine(iter.Join(","));
+                        }
+                        times.Add((reporttime, reporttime));
+                    }
+
+                    Console.WriteLine($"Ran {iReps} iterations with {iWorkers} workers in {times.Sum(t => t.cmd + t.report) / 1000}s");
+                    foreach(var time in times)
+                    {
+                        Console.WriteLine($"Cmd: {time.cmd},  rep: {time.report}");
                     }
 
                     // next - test rerunning with changed inputs - should cause changed outputs

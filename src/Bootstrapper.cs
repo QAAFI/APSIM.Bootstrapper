@@ -71,7 +71,7 @@ namespace APSIM.Bootstrapper
         /// <summary>
         /// Name of the docker image used by the job manager.
         /// </summary>
-        private const string imageName = "dhub.cgmwgp.com/apsimng:latest";
+        private const string imageName = "dhub.cgmwgp.com/apsimng:116";
 
         /// <summary>
         /// Name of the job manager pod.
@@ -355,7 +355,7 @@ namespace APSIM.Bootstrapper
         /// Issue a RUN command to the job manager.
         /// </summary>
         /// <param name="command">Command to be sent.</param>
-        public void RunWithChanges(RunCommand command)
+        public void RunWithChanges(ICommand command)
         {
             WriteToLog($"Executing {command}", Verbosity.Information);
 
@@ -391,9 +391,9 @@ namespace APSIM.Bootstrapper
         /// Issue a READ comand to the job manager.
         /// </summary>
         /// <param name="command">The command, detailing which parameters should be read.</param>
-        public DataTable ReadOutput(ReadCommand command)
+        public T ReadOutput<T>(IQuery<T> query)where T : class
         {
-            WriteToLog($"Executing {command}", Verbosity.Information);
+            WriteToLog($"Executing {query}", Verbosity.Information);
 
             var stopwatch = Stopwatch.StartNew();
 
@@ -411,7 +411,7 @@ namespace APSIM.Bootstrapper
                     WriteToLog($"Successfully established connection to job manager. Running command...", Verbosity.Information);
 
                     // Note - SendCommand will wait for the command to finish.
-                    DataTable result = conn.ReadOutput(command);
+                    T result = conn.SendQuery(query);
 
                     stopwatch.Stop();
                     WriteToLog($"Command executed successfully in {stopwatch.ElapsedMilliseconds}ms. Disconnecting...", Verbosity.Information);
